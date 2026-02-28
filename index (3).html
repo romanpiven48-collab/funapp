@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a2e">
+<title>Mathe-Kontostand-App</title>
+
+<!-- ╔══════════════════════════════════════════════════════════╗
+     ║  FIREBASE SETUP – HIER DEINE WERTE EINTRAGEN!           ║
+     ║  1. Gehe zu https://console.firebase.google.com         ║
+     ║  2. Neues Projekt erstellen                             ║
+     ║  3. "Authentication" → Email/Password aktivieren        ║
+     ║  4. "Realtime Database" erstellen (Test-Modus)          ║
+     ║  5. Projekt-Einstellungen → Web-App hinzufügen          ║
+     ║  6. Deine Config-Werte unten einsetzen                  ║
+     ╚══════════════════════════════════════════════════════════╝ -->
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { getDatabase, ref, set, get, update, onValue, child }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+  // ══════════════════════════════════════════
+  // 🔥 DEINE FIREBASE CONFIG – HIER EINTRAGEN
+  // ══════════════════════════════════════════
+  const firebaseConfig = {
+    apiKey:            "AIzaSyA39Qmh_tMKdGGQvjiiXyJa0Q2wXHBuSvU",
+    authDomain:        "roman-509b8.firebaseapp.com",
+    databaseURL:       "https://roman-509b8-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId:         "roman-509b8",
+    storageBucket:     "roman-509b8.firebasestorage.app",
+    messagingSenderId: "131919490662",
+    appId:             "1:131919490662:web:ff57ab2be05a61527347a7"
+  };
+  // ══════════════════════════════════════════
+
+  // Admin UID – nach erstem Login in Firebase Console nachschauen
+  // Authentication → Users → UID kopieren und hier einfügen
+  const ADMIN_UID = "ADMIN_UID_HIER_EINTRAGEN"; // Roman-Owner UID
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getDatabase(app);
+
+  // ─── Globale State ───────────────────────
+  window._fb = { auth, db, ref, set, get, update, onValue, child, ADMIN_UID };
+  window._currentUser = null;
+  window._currentUID  = null;
+
+  // ─── Auth State Listener ─────────────────
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      window._currentUID  = user.uid;
+      // Anzeigenamen aus DB lesen
+      const snap = await get(ref(db, `users/${user.uid}/profile`));
+      if (snap.exists()) {
+        window._currentUser = snap.val().displayName || user.email;
+      } else {
+        window._currentUser = user.email;
+      }
+      hideConfigWarning();
+      showScreen('menu');
+    } else {
+      window._currentUser = null;
+      window._currentUID  = null;
+      showScreen('login');
+    }
+  });
+
+  // ─── Helpers ─────────────────────────────
+  function dbRef(path)         { return ref(db, path); }
+  function dbGet(path)         { return get(dbRef(path)); }
+  function dbSet(path, val)    { return set(dbRef(path), val); }
+  function dbUpdate(path, val) { return update(dbRef(path), val); }
+
+  // ─── Auth Funktionen ─────────────────────
+  window.doRegister = async function() {
+    const name  = document.getElementById('reg-name').value.trim();
+    const name2 = document.getElementById('reg-name2').value.trim();
+    const pass  = document.getElementById('reg-pass').value;
+    const pass2 = document.getElementById('reg-pass2').value;
+
+    if (!name||!name2||!pass||!pass2) return showMsg('reg-msg','Bitte fülle alle Felder aus.','error');
+    if (name !== name2)               return showMsg('reg-msg','Die Namen stimmen nicht überein.','error');
+    if (pass !== pass2)               return showMsg('reg-msg','Passwörter stimmen nicht überein.','error');
+    if (pass.length < 4)              return showMsg('reg-msg','Passwort mind. 4 Zeichen.','error');
+
+    // Name als E-Mail-Format für Firebase Auth
+    const fakeEmail = name.toLowerCase().replace(/\s+/g,'_') + '@matheapp.local';
+
+    try {
+      showMsg('reg-msg','⏳ Registrierung läuft…','success');
+      const cred = await createUserWithEmailAndPassword(auth, fakeEmail, pass);
+      const uid  = cred.user.uid;
+
+      // Profil & Spieldaten in DB anlegen
+      await dbSet(`users/${uid}`, {
+        profile: { displayName: name, email: fakeEmail, createdAt: Date.now() },
+        game:    { kontostand: 10, fehler: 0, streak: 0, bestStreak: 0, maxKontostand: 10 },
+        extreme: { kontostand: 0, fehler: 0, streak: 0, bestStreak: 0, maxKontostand: 0, minKontostand: 0 },
+        clicker: { totalClicks: 0, sessionClicks: 0, bestDay: 0, banUntil: 0 },
+        avatar:  { type: 'emoji', emoji: '😎' }
+      });
+
+      showMsg('reg-msg','✅ Erfolgreich registriert!','success');
+    } catch(e) {
+      if (e.code === 'auth/email-already-in-use')
+        showMsg('reg-msg','❌ Dieser Name ist bereits vergeben.','error');
+      else
+        showMsg('reg-msg','❌ Fehler: ' + e.message,'error');
+    }
+  };
+
+  window.doLogin = async function() {
+    const name = document.getElementById('login-name').value.trim();
+    const pass = document.getElementById('login-pass').value;
+    if (!name||!pass) return showMsg('login-msg','Bitte alle Felder ausfüllen.','error');
+
+    const fakeEmail = name.toLowerCase().replace(/\s+/g,'_') + '@matheapp.local';
+    try {
+      showMsg('login-msg','⏳ Login läuft…','success');
+      await signInWithEmailAndPassword(auth, fakeEmail, pass);
+      // onAuthStateChanged übernimmt dann den Rest
+    } catch(e) {
+      showMsg('login-msg','❌ Name oder Passwort falsch.','error');
+    }
+  };
+
+  window.doLogout = async function() {
+    await signOut(auth);
+  };
+
+  // ─── Spieldaten ──────────────────────────
+  window.fbGetGame = async function() {
+    const snap = await dbGet(`users/${window._currentUID}/game`);
+    if (snap.exists()) return snap.val();
+    return { kontostand: 10, fehler: 0, streak: 0, bestStreak: 0, maxKontostand: 10 };
+  };
+  window.fbSaveGame = function(d) {
+    return dbSet(`users/${window._currentUID}/game`, d);
+  };
+
+  window.fbGetWeeklyBest = async function() {
+    const snap = await dbGet(`users/${window._currentUID}/weeklyBest`);
+    return snap.exists() ? snap.val() : { best: 10 };
+  };
+  window.fbSaveWeeklyBest = async function(konto) {
+    const cur = await window.fbGetWeeklyBest();
+    if (konto > (cur.best || 10)) {
+      await dbSet(`users/${window._currentUID}/weeklyBest`, { best: konto, updatedAt: Date.now() });
+    }
+  };
+
+  window.fbGetExtreme = async function() {
+    const snap = await dbGet(`users/${window._currentUID}/extreme`);
+    if (snap.exists()) return snap.val();
+    return { kontostand: 0, fehler: 0, streak: 0, bestStreak: 0, maxKontostand: 0, minKontostand: 0 };
+  };
+  window.fbSaveExtreme = function(d) {
+    return dbSet(`users/${window._currentUID}/extreme`, d);
+  };
+
+  window.fbGetClicker = async function() {
+    const snap = await dbGet(`users/${window._currentUID}/clicker`);
+    if (snap.exists()) return snap.val();
+    return { totalClicks: 0, sessionClicks: 0, bestDay: 0, banUntil: 0 };
+  };
+  window.fbSaveClicker = function(d) {
+    return dbSet(`users/${window._currentUID}/clicker`, d);
+  };
+
+  window.fbGetAvatar = async function(uid) {
+    uid = uid || window._currentUID;
+    const snap = await dbGet(`users/${uid}/avatar`);
+    return snap.exists() ? snap.val() : { type: 'emoji', emoji: '😎' };
+  };
+  window.fbSaveAvatar = function(data) {
+    return dbSet(`users/${window._currentUID}/avatar`, data);
+  };
+
+  // ─── Alle Spieler laden (für Leaderboard) ─
+  window.fbGetAllPlayers = async function() {
+    const snap = await dbGet('users');
+    if (!snap.exists()) return [];
+    const users = snap.val();
+    return Object.entries(users).map(([uid, data]) => ({
+      uid,
+      name:         data.profile?.displayName || uid,
+      kontostand:   data.game?.kontostand    ?? 10,
+      fehler:       data.game?.fehler        ?? 0,
+      bestStreak:   data.game?.bestStreak    ?? 0,
+      weeklyBest:   data.weeklyBest?.best    ?? 10,
+      totalClicks:  data.clicker?.totalClicks ?? 0,
+      extremeKonto: data.extreme?.kontostand ?? 0,
+      avatar:       data.avatar || { type: 'emoji', emoji: '😎' }
+    }));
+  };
+
+  // ─── Bonus Code ──────────────────────────
+  window.fbGetBonusCode = async function() {
+    const snap = await dbGet('config/bonusCode');
+    return snap.exists() ? snap.val() : 'ROMANTHECREATORPOPPYPLAYTIME';
+  };
+  window.fbSetBonusCode = function(code) {
+    return dbSet('config/bonusCode', code);
+  };
+  window.fbCheckBonusUsed = async function() {
+    const snap = await dbGet(`users/${window._currentUID}/bonusUsedAt`);
+    if (!snap.exists()) return false;
+    const used = snap.val();
+    const WEEK = 7*24*60*60*1000;
+    return (Date.now() - used) < WEEK;
+  };
+  window.fbMarkBonusUsed = function() {
+    return dbSet(`users/${window._currentUID}/bonusUsedAt`, Date.now());
+  };
+
+  // ─── Admin Funktionen ────────────────────
+  window.fbIsAdmin = function() {
+    return window._currentUID === ADMIN_UID;
+  };
+
+  window.fbAdminGetAllUsers = async function() {
+    const snap = await dbGet('users');
+    if (!snap.exists()) return [];
+    return Object.entries(snap.val()).map(([uid, data]) => ({
+      uid,
+      name:      data.profile?.displayName || uid,
+      email:     data.profile?.email || '',
+      kontostand:data.game?.kontostand ?? 10,
+      clicker:   data.clicker?.totalClicks ?? 0,
+      createdAt: data.profile?.createdAt || 0
+    }));
+  };
+
+  window.fbAdminGeldGeben = async function(targetUID, betrag) {
+    const snap = await dbGet(`users/${targetUID}/game`);
+    const d = snap.exists() ? snap.val() : { kontostand: 10, fehler: 0, streak: 0, bestStreak: 0, maxKontostand: 10 };
+    d.kontostand += betrag;
+    d.maxKontostand = Math.max(d.maxKontostand || 10, d.kontostand);
+    await dbSet(`users/${targetUID}/game`, d);
+    // WeeklyBest updaten
+    const wb = await dbGet(`users/${targetUID}/weeklyBest`);
+    const cur = wb.exists() ? wb.val() : { best: 10 };
+    if (d.kontostand > (cur.best || 10)) {
+      await dbSet(`users/${targetUID}/weeklyBest`, { best: d.kontostand, updatedAt: Date.now() });
+    }
+    return d.kontostand;
+  };
+
+  window.fbAdminResetAlleKonten = async function() {
+    const snap = await dbGet('users');
+    if (!snap.exists()) return;
+    const updates = {};
+    Object.keys(snap.val()).forEach(uid => {
+      updates[`users/${uid}/game/kontostand`] = 10;
+      updates[`users/${uid}/weeklyBest`] = { best: 10, updatedAt: Date.now() };
+    });
+    await update(ref(db), updates);
+  };
+
+  window.fbAdminResetClicker = async function() {
+    const snap = await dbGet('users');
+    if (!snap.exists()) return;
+    const updates = {};
+    Object.keys(snap.val()).forEach(uid => {
+      updates[`users/${uid}/clicker/totalClicks`]  = 0;
+      updates[`users/${uid}/clicker/sessionClicks`]= 0;
+      updates[`users/${uid}/clicker/bestDay`]      = 0;
+    });
+    await update(ref(db), updates);
+  };
+
+  // Config prüfen
+  window.fbCheckConfig = function() {
+    return firebaseConfig.apiKey !== "DEIN_API_KEY";
+  };
+
+  console.log("🔥 Firebase geladen");
+</script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #1a1a2e;
+    --card: #16213e;
+    --accent: #e94560;
+    --accent2: #ff6b6b;
+    --success: #4caf50;
+    --warning: #ff9800;
+    --text: #eaeaea;
+    --dim: #9e9e9e;
+    --border: #2d2d4e;
+    --input: #0f3460;
+  }
+
+  html, body { height:100%; width:100%; overflow-x:hidden; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-height: 100vh; display: flex; justify-content: center; align-items: flex-start;
+  }
+  .app { width:100%; max-width:100%; min-height:100vh; background:var(--bg); position:relative; overflow-x:hidden; }
+
+  .screen { display:none; padding:24px 20px 40px; min-height:100vh; flex-direction:column; }
+  .screen.active { display:flex; }
+
+  .header { display:flex; align-items:center; margin-bottom:28px; gap:12px; }
+  .back-btn { background:var(--card); border:none; color:var(--text); font-size:20px; width:38px; height:38px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .screen-title { font-size:22px; font-weight:700; }
+
+  .logo-title { font-size:28px; font-weight:800; text-align:center; margin-bottom:8px; }
+  .logo-sub { text-align:center; color:var(--dim); margin-bottom:32px; font-size:15px; }
+
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:12px; }
+
+  label { display:block; color:var(--dim); font-size:13px; margin-bottom:5px; margin-top:10px; }
+  input[type=text], input[type=password], input[type=number] {
+    width:100%; background:var(--input); border:1px solid var(--border); border-radius:8px;
+    padding:13px 14px; color:var(--text); font-size:16px; outline:none; transition:border-color .2s;
+  }
+  input:focus { border-color:var(--accent); }
+  input::placeholder { color:var(--dim); }
+
+  .btn { width:100%; padding:14px; border:none; border-radius:8px; font-size:16px; font-weight:700; cursor:pointer; margin-top:10px; transition:opacity .15s, transform .1s; }
+  .btn:active { transform:scale(0.98); opacity:0.85; }
+  .btn-primary { background:var(--accent); color:#fff; }
+  .btn-outline { background:transparent; border:2px solid var(--accent); color:var(--accent); }
+  .btn-success { background:var(--success); color:#fff; }
+  .btn-warn { background:var(--warning); color:#fff; }
+
+  .msg { padding:12px; border-radius:8px; margin-top:10px; font-size:14px; text-align:center; }
+  .msg-error { background:#3a1b1b; color:var(--accent2); }
+  .msg-success { background:#1b3a2a; color:var(--success); }
+
+  .menu-btn { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px 18px; color:var(--text); font-size:17px; font-weight:600; text-align:left; width:100%; cursor:pointer; margin-bottom:10px; transition:border-color .2s, background .2s; }
+  .menu-btn:hover { border-color:var(--accent); background:#1e2a48; }
+
+  .stats-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:14px; }
+  .stat-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 8px; text-align:center; }
+  .stat-label { font-size:11px; color:var(--dim); margin-bottom:4px; }
+  .stat-value { font-size:20px; font-weight:700; }
+
+  .task-card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; text-align:center; margin-bottom:14px; }
+  .task-text { font-size:22px; font-weight:700; margin:8px 0; }
+
+  .lb-tab { flex:1; padding:9px 4px; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--dim); font-size:13px; font-weight:600; cursor:pointer; transition:all .2s; }
+  .lb-tab.active-tab { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .lb-row { display:flex; align-items:center; gap:12px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:8px; }
+  .lb-row.me { border-color:var(--accent); background:#1e1632; }
+  .lb-rank { font-size:22px; font-weight:800; min-width:32px; text-align:center; }
+  .lb-rank-1 { color:#ffd700; }
+  .lb-rank-2 { color:#c0c0c0; }
+  .lb-rank-3 { color:#cd7f32; }
+  .lb-rank-other { color:var(--dim); font-size:16px; }
+  .lb-row-name { flex:1; font-weight:600; font-size:15px; }
+  .lb-row-val { font-size:18px; font-weight:800; color:var(--accent); }
+  .lb-me-badge { font-size:10px; background:var(--accent); color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; }
+
+  .avatar-img-wrap { width:72px; height:72px; border-radius:50%; overflow:hidden; margin:0 auto 10px; border:3px solid var(--accent); background:var(--card); display:flex; align-items:center; justify-content:center; font-size:38px; cursor:pointer; }
+  .profile-name { font-size:20px; font-weight:700; text-align:center; margin-bottom:24px; }
+  .stat-row-item { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px 18px; display:flex; align-items:center; gap:14px; margin-bottom:10px; }
+  .stat-row-icon { font-size:26px; }
+  .stat-row-label { font-size:13px; color:var(--dim); }
+  .stat-row-value { font-size:22px; font-weight:700; color:var(--accent); }
+
+  .step-block { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px; transition:opacity .2s; }
+  .step-block.active-step { border-color:var(--accent); }
+  .step-label { font-size:13px; font-weight:700; color:var(--text); margin-bottom:8px; display:flex; align-items:center; gap:8px; }
+  .step-num { background:var(--accent); color:#fff; border-radius:50%; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; flex-shrink:0; }
+
+  .clicker-btn { width:180px; height:180px; border-radius:50%; border:none; background:radial-gradient(circle at 35% 35%,#ff7a5c,#e94560 60%,#a0001c); box-shadow:0 8px 32px #e9456066,0 2px 0 #7a0020; cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:64px; margin:0 auto; transition:transform .08s,box-shadow .08s; user-select:none; -webkit-user-select:none; }
+  .clicker-btn:active { transform:scale(0.93); box-shadow:0 2px 10px #e9456066,0 1px 0 #7a0020; }
+  .clicker-score-big { font-size:48px; font-weight:900; text-align:center; color:var(--text); letter-spacing:-1px; margin:16px 0 4px; }
+  .clicker-sub { font-size:13px; color:var(--dim); text-align:center; margin-bottom:16px; }
+  .clicker-stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px; }
+  .click-pop { position:fixed; pointer-events:none; font-size:22px; font-weight:800; color:#ffd700; text-shadow:0 2px 8px #0008; animation:pop-up .7s ease-out forwards; z-index:999; }
+  @keyframes pop-up { 0%{opacity:1;transform:translateY(0) scale(1)} 100%{opacity:0;transform:translateY(-80px) scale(1.4)} }
+  .ban-overlay { background:#1a0a0a; border:2px solid var(--accent); border-radius:16px; padding:28px 20px; text-align:center; margin-top:24px; }
+  .ban-timer { font-size:36px; font-weight:900; color:var(--accent); letter-spacing:2px; margin:10px 0; }
+
+  .extreme-badge { display:inline-block; background:linear-gradient(90deg,#ff0040,#ff6b00); color:#fff; font-size:11px; font-weight:900; padding:3px 8px; border-radius:20px; letter-spacing:1px; text-transform:uppercase; margin-left:6px; vertical-align:middle; animation:pulse-badge 1.5s ease-in-out infinite; }
+  @keyframes pulse-badge { 0%,100%{box-shadow:0 0 6px #ff004088} 50%{box-shadow:0 0 18px #ff6b00cc} }
+  .extreme-screen-title { background:linear-gradient(90deg,#ff0040,#ff9500); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; font-weight:900; }
+
+  /* ADMIN PANEL */
+  .admin-user-row { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:8px; display:flex; align-items:center; gap:10px; }
+  .admin-user-name { flex:1; font-weight:600; font-size:14px; }
+  .admin-user-stats { font-size:12px; color:var(--dim); }
+  .admin-badge { display:inline-block; background:linear-gradient(90deg,#e94560,#ff6b00); color:#fff; font-size:10px; font-weight:900; padding:2px 7px; border-radius:20px; letter-spacing:0.5px; }
+
+  /* CONFIG WARNING */
+  .config-warn { background:#2a1500; border:2px solid var(--warning); border-radius:12px; padding:20px; margin-bottom:16px; text-align:center; font-size:13px; color:var(--warning); }
+  .config-warn code { background:#1a0a00; padding:2px 6px; border-radius:4px; font-size:12px; color:#ffcc80; }
+
+  .emoji-opt { font-size:28px; cursor:pointer; padding:4px; border-radius:8px; transition:background .15s; }
+  .emoji-opt:hover { background:var(--border); }
+
+  .welcome-sub { text-align:center; color:var(--dim); margin-bottom:28px; font-size:15px; }
+
+  /* Loading spinner */
+  .spinner { display:inline-block; width:20px; height:20px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ═══════════════════ CONFIG WARNING ═══════════════════ -->
+  <div id="config-warning" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:var(--bg); z-index:9999; padding:30px 20px; display:flex; flex-direction:column; justify-content:center;">
+    <div class="logo-title">🔥 Firebase Setup</div>
+    <div class="logo-sub">Noch nicht konfiguriert</div>
+    <div class="config-warn">
+      <div style="font-size:24px; margin-bottom:12px;">⚙️</div>
+      <div style="font-size:16px; font-weight:700; margin-bottom:12px;">Firebase noch nicht eingerichtet!</div>
+      <div style="margin-bottom:16px; line-height:1.6;">
+        Öffne diese HTML-Datei in einem Code-Editor und trage deine Firebase-Daten ein.<br>
+        Suche nach dem Kommentar <code>DEINE FIREBASE CONFIG</code> ganz oben im &lt;script&gt;-Block.
+      </div>
+      <div style="text-align:left; background:#1a0a00; border-radius:8px; padding:14px; margin-bottom:16px;">
+        <div style="font-weight:700; margin-bottom:8px; color:#ffcc80;">📋 Schritt-für-Schritt:</div>
+        <div style="line-height:2; font-size:12px; color:#ffaa66;">
+          1️⃣ Gehe zu <b>console.firebase.google.com</b><br>
+          2️⃣ Neues Projekt erstellen<br>
+          3️⃣ <b>Authentication</b> → Email/Password aktivieren<br>
+          4️⃣ <b>Realtime Database</b> erstellen (Test-Modus)<br>
+          5️⃣ Projekteinstellungen → Web-App hinzufügen<br>
+          6️⃣ Config-Werte in den Code eintragen<br>
+          7️⃣ Nach erstem Login: Admin-UID in Code eintragen
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ LOGIN ═══════════════════ -->
+  <div class="screen active" id="screen-login">
+    <div style="flex:1; display:flex; flex-direction:column; justify-content:center;">
+      <div class="logo-title">🔐 Login</div>
+      <div class="logo-sub">Mathe-Kontostand-App</div>
+      <label>Name</label>
+      <input type="text" id="login-name" placeholder="Name eingeben" autocomplete="off">
+      <label>Passwort</label>
+      <div style="position:relative">
+        <input type="password" id="login-pass" placeholder="Passwort" style="padding-right:48px">
+        <button onclick="togglePass('login-pass',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--dim);font-size:18px;cursor:pointer;padding:4px">👁</button>
+      </div>
+      <div id="login-msg"></div>
+      <button class="btn btn-primary" onclick="doLogin()" style="margin-top:18px">Login</button>
+      <button class="btn btn-outline" onclick="showScreen('register')">Registrieren</button>
+      <div style="text-align:center; margin-top:24px; color:var(--dim); font-size:12px;">
+        Gemacht von <span style="color:var(--accent); font-weight:700;">Halil</span> &amp; <span style="color:var(--accent); font-weight:700;">Roman</span> 🦫
+        <div style="margin-top:6px; font-size:11px;">🔥 Powered by Firebase</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ REGISTER ═══════════════════ -->
+  <div class="screen" id="screen-register">
+    <div style="flex:1; display:flex; flex-direction:column; justify-content:center;">
+      <div class="logo-title">📝 Registrieren</div>
+      <div class="logo-sub">Erstelle deinen Account</div>
+      <label>Name</label>
+      <input type="text" id="reg-name" placeholder="Dein Name" autocomplete="off">
+      <label>Name wiederholen</label>
+      <input type="text" id="reg-name2" placeholder="Name wiederholen" autocomplete="off">
+      <label>Passwort</label>
+      <div style="position:relative">
+        <input type="password" id="reg-pass" placeholder="Passwort" style="padding-right:48px">
+        <button onclick="togglePass('reg-pass',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--dim);font-size:18px;cursor:pointer;padding:4px">👁</button>
+      </div>
+      <label>Passwort wiederholen</label>
+      <div style="position:relative">
+        <input type="password" id="reg-pass2" placeholder="Passwort wiederholen" style="padding-right:48px">
+        <button onclick="togglePass('reg-pass2',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--dim);font-size:18px;cursor:pointer;padding:4px">👁</button>
+      </div>
+      <div id="reg-msg"></div>
+      <button class="btn btn-primary" onclick="doRegister()" style="margin-top:18px">Registrieren</button>
+      <button class="btn btn-outline" onclick="showScreen('login')">Zurück zum Login</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ HAUPTMENÜ ═══════════════════ -->
+  <div class="screen" id="screen-menu">
+    <div style="padding-top:20px;">
+      <div class="logo-title">Hauptmenü</div>
+      <div class="welcome-sub" id="menu-welcome"></div>
+      <button class="menu-btn" onclick="showScreen('spiel')">🧮 Mathe-Kontostand-Spiel</button>
+      <button class="menu-btn" onclick="showScreen('extreme')" style="border-color:#ff004044; background:linear-gradient(135deg,#1a0a0a,#1a0d00);">💀 Extreme Schulden-Modus<span class="extreme-badge">NEU</span></button>
+      <button class="menu-btn" onclick="showScreen('clicker')">👆 Clicker</button>
+      <button class="menu-btn" onclick="showScreen('leaderboard')">🏆 Leaderboards</button>
+      <button class="menu-btn" onclick="showScreen('profil')">👤 Profil</button>
+      <button class="btn btn-outline" style="margin-top:20px" onclick="doLogout()">Ausloggen</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ SPIEL ═══════════════════ -->
+  <div class="screen" id="screen-spiel">
+    <div class="header">
+      <button class="back-btn" onclick="showScreen('menu')">←</button>
+      <span class="screen-title">🧮 Mathe-Kontostand-Spiel</span>
+    </div>
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-label">Kontostand</div><div class="stat-value" id="spiel-konto" style="color:var(--success)">10</div></div>
+      <div class="stat-card"><div class="stat-label">Fehler</div><div class="stat-value" id="spiel-fehler" style="color:var(--accent2)">0</div></div>
+      <div class="stat-card"><div class="stat-label">Streak 🔥</div><div class="stat-value" id="spiel-streak" style="color:var(--warning)">0</div></div>
+    </div>
+    <div class="task-card">
+      <div class="stat-label">Aktuelle Aufgabe:</div>
+      <div class="task-text" id="spiel-aufgabe">Lade…</div>
+    </div>
+    <div class="step-block" id="step1-block">
+      <div class="step-label"><span class="step-num">1</span> Schreibe die Rechnung auf</div>
+      <input type="text" id="spiel-rechnung" placeholder="z. B. -(+7) oder -(−5)" autocomplete="off" onblur="rechnungWeiter()">
+    </div>
+    <div class="step-block" id="step2-block" style="opacity:0.4; pointer-events:none" onclick="rechnungWeiter()">
+      <div class="step-label"><span class="step-num">2</span> Was ist dein neuer Kontostand?</div>
+      <input type="number" id="spiel-antwort" placeholder="z. B. 3 oder -7">
+    </div>
+    <div id="spiel-msg"></div>
+    <button class="btn btn-primary" id="spiel-pruefen-btn" onclick="spielPruefen()">Antwort prüfen</button>
+    <button class="btn btn-outline" onclick="spielNeueAufgabe()">Neue Aufgabe</button>
+    <div style="text-align:center; color:var(--dim); font-size:13px; margin-top:10px" id="spiel-rekord"></div>
+  </div>
+
+  <!-- ═══════════════════ EXTREME ═══════════════════ -->
+  <div class="screen" id="screen-extreme">
+    <div class="header">
+      <button class="back-btn" onclick="showScreen('menu')">←</button>
+      <span class="screen-title extreme-screen-title">💀 Extreme Schulden</span>
+    </div>
+    <div style="background:linear-gradient(135deg,#1a0505,#1a0d00); border:1px solid #ff004066; border-radius:12px; padding:10px 14px; margin-bottom:12px; font-size:12px; color:#ff9966; text-align:center;">
+      ⚠️ Zahlen bis ±500 · Multiplikatoren bis 10× · Doppel-Schulden
+    </div>
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-label">Schulden-Konto</div><div class="stat-value" id="ext-konto" style="color:var(--success)">0</div></div>
+      <div class="stat-card"><div class="stat-label">Fehler</div><div class="stat-value" id="ext-fehler" style="color:var(--accent2)">0</div></div>
+      <div class="stat-card"><div class="stat-label">Streak 🔥</div><div class="stat-value" id="ext-streak" style="color:var(--warning)">0</div></div>
+    </div>
+    <div class="task-card" style="border-color:#ff6b0055; background:#1a0d00;">
+      <div class="stat-label" style="color:#ff9966;">Extreme Aufgabe:</div>
+      <div class="task-text" id="ext-aufgabe" style="font-size:18px;">Lade…</div>
+      <div id="ext-kontext" style="font-size:12px; color:#ff9966; margin-top:6px;"></div>
+    </div>
+    <div class="step-block" id="ext-step1-block">
+      <div class="step-label"><span class="step-num">1</span> Schreibe die Rechnung auf</div>
+      <input type="text" id="ext-rechnung" placeholder="z. B. -(+150) oder 3·(−75)" autocomplete="off" onblur="extRechnungWeiter()">
+    </div>
+    <div class="step-block" id="ext-step2-block" style="opacity:0.4; pointer-events:none" onclick="extRechnungWeiter()">
+      <div class="step-label"><span class="step-num">2</span> Neuer Kontostand?</div>
+      <input type="number" id="ext-antwort" placeholder="z. B. -350 oder 120">
+    </div>
+    <div id="ext-msg"></div>
+    <button class="btn" id="ext-pruefen-btn" onclick="extPruefen()" style="background:linear-gradient(90deg,#ff0040,#ff6b00);color:#fff;margin-top:10px;">Antwort prüfen</button>
+    <button class="btn btn-outline" onclick="extNeueAufgabe()" style="border-color:#ff6b00;color:#ff9966;">Neue Aufgabe</button>
+    <div style="text-align:center;color:var(--dim);font-size:13px;margin-top:10px" id="ext-rekord"></div>
+  </div>
+
+  <!-- ═══════════════════ CLICKER ═══════════════════ -->
+  <div class="screen" id="screen-clicker">
+    <div class="header">
+      <button class="back-btn" onclick="showScreen('menu')">←</button>
+      <span class="screen-title">👆 Clicker</span>
+    </div>
+    <div id="clicker-ban-overlay" style="display:none;">
+      <div class="ban-overlay">
+        <div style="font-size:48px">🚫</div>
+        <div style="font-size:20px;font-weight:800;color:var(--accent);margin:8px 0;">Auto-Klick erkannt!</div>
+        <div style="font-size:14px;color:var(--dim);margin-bottom:12px;">30 Minuten gesperrt.</div>
+        <div class="ban-timer" id="clicker-ban-timer">30:00</div>
+      </div>
+    </div>
+    <div id="clicker-main">
+      <div class="clicker-score-big" id="clicker-score">0</div>
+      <div class="clicker-sub">Klicks gesamt</div>
+      <div class="clicker-stats-grid">
+        <div class="stat-card"><div class="stat-label">Diese Sitzung</div><div class="stat-value" id="clicker-session" style="color:var(--warning)">0</div></div>
+        <div class="stat-card"><div class="stat-label">Klicks/Sek ⚡</div><div class="stat-value" id="clicker-cps" style="color:var(--success)">0.0</div></div>
+        <div class="stat-card"><div class="stat-label">Bester Tag 📅</div><div class="stat-value" id="clicker-best-day" style="color:var(--accent)">0</div></div>
+        <div class="stat-card"><div class="stat-label">Rekord 🏆</div><div class="stat-value" id="clicker-alltime" style="color:var(--accent2)">0</div></div>
+      </div>
+      <div style="display:flex;justify-content:center;margin-bottom:20px;">
+        <button class="clicker-btn" id="clicker-button" onclick="clickerClick(event)">🦫</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);text-align:center;">⚠️ Auto-Klick → 30 Min. Sperre</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ LEADERBOARD ═══════════════════ -->
+  <div class="screen" id="screen-leaderboard">
+    <div class="header">
+      <button class="back-btn" onclick="showScreen('menu')">←</button>
+      <span class="screen-title">🏆 Leaderboards</span>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;">
+      <button class="lb-tab active-tab" id="tab-konto"   onclick="switchTab('konto')">📈 Wochenrekord</button>
+      <button class="lb-tab" id="tab-live"    onclick="switchTab('live')">💰 Aktuell</button>
+      <button class="lb-tab" id="tab-streak"  onclick="switchTab('streak')">🔥 Streak</button>
+      <button class="lb-tab" id="tab-fehler"  onclick="switchTab('fehler')">🎯 Fehler</button>
+      <button class="lb-tab" id="tab-clicker" onclick="switchTab('clicker')">👆 Clicker</button>
+      <button class="lb-tab" id="tab-extreme" onclick="switchTab('extreme')" style="flex-basis:100%;background:linear-gradient(90deg,#2a0a0a,#1a0d00);border-color:#ff004066;color:#ff9966;">💀 Extreme</button>
+    </div>
+    <div id="lb-loading" style="text-align:center;color:var(--dim);padding:20px;"><span class="spinner"></span>Lade…</div>
+    <div id="lb-list-konto"   class="lb-list" style="display:none"></div>
+    <div id="lb-list-live"    class="lb-list" style="display:none"></div>
+    <div id="lb-list-streak"  class="lb-list" style="display:none"></div>
+    <div id="lb-list-fehler"  class="lb-list" style="display:none"></div>
+    <div id="lb-list-clicker" class="lb-list" style="display:none"></div>
+    <div id="lb-list-extreme" class="lb-list" style="display:none"></div>
+  </div>
+
+  <!-- ═══════════════════ PROFIL ═══════════════════ -->
+  <div class="screen" id="screen-profil">
+    <div class="header">
+      <button class="back-btn" onclick="showScreen('menu')">←</button>
+      <span class="screen-title">👤 Profil</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;margin-bottom:16px;">
+      <div style="position:relative;display:inline-block;">
+        <div class="avatar-img-wrap" id="profil-avatar" onclick="document.getElementById('avatar-picker').style.display='block'"></div>
+        <div style="position:absolute;bottom:0;right:0;background:var(--accent);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;" onclick="document.getElementById('avatar-picker').style.display='block'">✏️</div>
+      </div>
+      <div id="avatar-picker" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:10px;text-align:center;max-width:320px;width:100%;">
+        <div style="font-size:12px;color:var(--dim);margin-bottom:8px;">Profilbild wählen:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;">
+          <span class="emoji-opt" onclick="setAvatar('😎')">😎</span>
+          <span class="emoji-opt" onclick="setAvatar('🦊')">🦊</span>
+          <span class="emoji-opt" onclick="setAvatar('🐱')">🐱</span>
+          <span class="emoji-opt" onclick="setAvatar('🐶')">🐶</span>
+          <span class="emoji-opt" onclick="setAvatar('🐸')">🐸</span>
+          <span class="emoji-opt" onclick="setAvatar('🦁')">🦁</span>
+          <span class="emoji-opt" onclick="setAvatar('🐼')">🐼</span>
+          <span class="emoji-opt" onclick="setAvatar('🦄')">🦄</span>
+          <span class="emoji-opt" onclick="setAvatar('👾')">👾</span>
+          <span class="emoji-opt" onclick="setAvatar('🤖')">🤖</span>
+          <span class="emoji-opt" onclick="setAvatar('👑')">👑</span>
+          <span class="emoji-opt" onclick="setAvatar('🔥')">🔥</span>
+          <span class="emoji-opt" onclick="setAvatar('🦫')">🦫</span>
+          <span class="emoji-opt" onclick="setAvatar('🐉')">🐉</span>
+          <span class="emoji-opt" onclick="setAvatar('🦈')">🦈</span>
+          <span class="emoji-opt" onclick="setAvatar('🐙')">🐙</span>
+        </div>
+        <button class="btn btn-outline" style="margin-top:10px;padding:8px;font-size:13px;" onclick="document.getElementById('avatar-picker').style.display='none'">Schließen</button>
+      </div>
+      <div class="profile-name" id="profil-name" style="margin-top:10px;margin-bottom:0;"></div>
+    </div>
+    <div class="stat-row-item"><div class="stat-row-icon">💰</div><div style="flex:1"><div class="stat-row-label">Aktueller Kontostand</div><div class="stat-row-value" id="profil-konto"></div></div></div>
+    <div class="stat-row-item"><div class="stat-row-icon">📈</div><div style="flex:1"><div class="stat-row-label">Höchster Kontostand</div><div class="stat-row-value" id="profil-maxkonto"></div></div></div>
+    <div class="stat-row-item"><div class="stat-row-icon">❌</div><div style="flex:1"><div class="stat-row-label">Gesamtfehler</div><div class="stat-row-value" id="profil-fehler"></div></div></div>
+    <div class="stat-row-item"><div class="stat-row-icon">🔥</div><div style="flex:1"><div class="stat-row-label">Beste fehlerfreie Serie</div><div class="stat-row-value" id="profil-streak"></div></div></div>
+
+    <!-- Admin-Bereich -->
+    <div id="reset-section" style="display:none; margin-top:20px;">
+      <div style="border-top:1px solid var(--border);padding-top:16px;">
+        <div style="font-size:13px;font-weight:700;color:var(--accent);text-align:center;margin-bottom:12px;">
+          ⚙️ Admin-Bereich <span class="admin-badge">FIREBASE</span>
+        </div>
+
+        <!-- Alle User anzeigen -->
+        <button class="btn" onclick="adminLadeUser()" style="background:#0d4a6e;color:#fff;margin-bottom:6px;">👥 Alle Nutzer anzeigen / Passwörter</button>
+        <div id="admin-user-list" style="display:none; margin-bottom:10px;"></div>
+
+        <button class="btn" onclick="adminResetKonten()" style="background:#b34700;color:#fff;margin-bottom:6px;">🔄 Alle Konten auf 10 zurücksetzen</button>
+        <button class="btn" onclick="adminResetClicker()" style="background:#4a0d6e;color:#fff;margin-bottom:6px;">👆 Clicker-Scores zurücksetzen</button>
+
+        <!-- Geld geben -->
+        <button class="btn" onclick="toggleGeldGeben()" style="background:#1a3a4a;color:#fff;margin-bottom:6px;">💸 Geld an Spieler geben</button>
+        <div id="geld-geben-section" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:6px;">
+          <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:10px;text-align:center;">💸 Geld übertragen</div>
+          <label style="margin-top:0;">Empfänger:</label>
+          <select id="geld-empfaenger" style="width:100%;background:var(--input);border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--text);font-size:15px;outline:none;margin-bottom:4px;"><option value="">– Spieler auswählen –</option></select>
+          <div id="geld-empfaenger-konto" style="font-size:12px;color:var(--dim);margin-bottom:6px;text-align:right;"></div>
+          <label>Betrag (kann negativ sein):</label>
+          <input type="number" id="geld-betrag" placeholder="z. B. 500 oder -100" style="margin-bottom:8px;">
+          <button class="btn btn-success" style="padding:11px;" onclick="adminGeldGeben()">💸 Geld geben</button>
+          <div id="geld-msg"></div>
+        </div>
+
+        <!-- Bonus Code -->
+        <button class="btn" onclick="toggleBonusCode()" style="background:#1a4a2e;color:#fff;margin-bottom:6px;">🔑 Bonus-Code verwalten</button>
+        <div id="bonus-code-section" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:6px;">
+          <div style="font-size:12px;color:var(--dim);margin-bottom:8px;">Aktueller Code: <span id="aktueller-code" style="color:var(--warning);font-weight:700;"></span></div>
+          <label style="margin-top:0;">Neuer Code:</label>
+          <input type="text" id="neuer-code-input" placeholder="Neuen Code eingeben" style="text-transform:uppercase;margin-bottom:8px;">
+          <button class="btn btn-success" style="padding:10px;" onclick="adminSaveCode()">💾 Code speichern</button>
+          <div id="code-msg"></div>
+        </div>
+
+        <div id="reset-msg"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// HAUPTLOGIK (kommuniziert mit Firebase über window._fb)
+// ═══════════════════════════════════════════════════════
+
+function hideConfigWarning() { document.getElementById('config-warning').style.display = 'none'; }
+
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + name).classList.add('active');
+  window.scrollTo(0,0);
+  if (name === 'menu')        loadMenu();
+  if (name === 'spiel')       loadSpiel();
+  if (name === 'extreme')     loadExtreme();
+  if (name === 'clicker')     loadClicker();
+  if (name === 'leaderboard') loadLeaderboard();
+  if (name === 'profil')      loadProfil();
+}
+
+function showMsg(id, text, type) {
+  document.getElementById(id).innerHTML = `<div class="msg msg-${type}">${text}</div>`;
+}
+
+function togglePass(inputId, btn) {
+  const input = document.getElementById(inputId);
+  input.type = input.type === 'password' ? 'text' : 'password';
+  btn.textContent = input.type === 'password' ? '👁' : '🙈';
+}
+
+function rnd(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+// ─── MENÜ ────────────────────────────────
+function loadMenu() {
+  document.getElementById('menu-welcome').textContent = `Willkommen, ${window._currentUser}!`;
+}
+
+// ─── SPIEL ───────────────────────────────
+let spielState = null;
+
+function genAufgabe(prevId) {
+  let t;
+  do {
+    const type = rnd(1,4);
+    if (type===1) { const x=rnd(1,25); t={text:`Du verlierst ${x} Guthaben`,delta:-x,id:`t1_${x}`,formel:`-(+${x})`}; }
+    else if (type===2) { const x=rnd(1,25); t={text:`Du bekommst ${x} Schulden`,delta:-x,id:`t2_${x}`,formel:`+(−${x})`}; }
+    else if (type===3) { const x=rnd(1,25); t={text:`Du gibst ${x} Schulden ab`,delta:+x,id:`t3_${x}`,formel:`-(−${x})`}; }
+    else { const n=rnd(2,5),x=rnd(1,25),sub=rnd(1,2);
+      if (sub===1) t={text:`${n}× Du verlierst ${x} Guthaben`,delta:-(n*x),id:`t4a_${n}_${x}`,formel:`${n}·(+(${x}))`};
+      else         t={text:`${n}× Du bekommst ${x} Schulden`,delta:-(n*x),id:`t4b_${n}_${x}`,formel:`${n}·(−(${x}))`};
+    }
+  } while(t.id === prevId);
+  return t;
+}
+
+async function loadSpiel() {
+  const d = await window.fbGetGame();
+  spielState = {...d, aufgabe: genAufgabe(null), beantwortet: false};
+  renderSpiel();
+}
+
+function renderSpiel() {
+  const s = spielState;
+  document.getElementById('spiel-konto').textContent  = s.kontostand;
+  document.getElementById('spiel-konto').style.color  = s.kontostand>=0 ? 'var(--success)' : 'var(--accent2)';
+  document.getElementById('spiel-fehler').textContent = s.fehler;
+  document.getElementById('spiel-streak').textContent = s.streak;
+  document.getElementById('spiel-aufgabe').textContent= s.aufgabe.text;
+  document.getElementById('spiel-rekord').textContent = `Beste Streak: ${s.bestStreak} | Höchster Kontostand: ${s.maxKontostand}`;
+  document.getElementById('spiel-rechnung').value='';
+  document.getElementById('spiel-antwort').value='';
+  document.getElementById('spiel-msg').innerHTML='';
+  const b1=document.getElementById('step1-block');
+  const b2=document.getElementById('step2-block');
+  b1.classList.add('active-step'); b1.style.opacity='1'; b1.style.pointerEvents='auto';
+  b2.classList.remove('active-step'); b2.style.opacity='0.4'; b2.style.pointerEvents='auto'; b2.style.cursor='pointer';
+  document.getElementById('spiel-pruefen-btn').style.display = s.beantwortet ? 'none' : 'block';
+}
+
+function rechnungWeiter() {
+  const b2 = document.getElementById('step2-block');
+  b2.style.opacity='1'; b2.style.cursor='default'; b2.classList.add('active-step'); b2.onclick=null;
+}
+
+let BONUS_CODE_CACHE = null;
+
+async function spielPruefen() {
+  const s = spielState;
+  if (s.beantwortet) return;
+  const rechnung   = document.getElementById('spiel-rechnung').value.trim();
+  const antwortRaw = document.getElementById('spiel-antwort').value;
+  if (!rechnung) return showMsg('spiel-msg','Bitte schreibe zuerst die Rechnung auf (Schritt 1).','error');
+
+  // Bonus Code Check
+  if (!BONUS_CODE_CACHE) BONUS_CODE_CACHE = await window.fbGetBonusCode();
+  if (rechnung.toUpperCase() === BONUS_CODE_CACHE) {
+    const used = await window.fbCheckBonusUsed();
+    if (used) { showMsg('spiel-msg','❌ Bonus-Code diese Woche bereits eingelöst!','error'); return; }
+    await window.fbMarkBonusUsed();
+    const bonus = rnd(1000,15000);
+    s.kontostand += bonus;
+    s.maxKontostand = Math.max(s.maxKontostand, s.kontostand);
+    await window.fbSaveGame({kontostand:s.kontostand,fehler:s.fehler,streak:s.streak,bestStreak:s.bestStreak,maxKontostand:s.maxKontostand});
+    await window.fbSaveWeeklyBest(s.kontostand);
+    showMsg('spiel-msg',`🎉 Bonus! +${bonus} Guthaben! Neuer Kontostand: <b>${s.kontostand}</b>`,'success');
+    document.getElementById('spiel-konto').textContent = s.kontostand;
+    setTimeout(()=>spielNeueAufgabe(),1800);
+    return;
+  }
+
+  const val = parseFloat(antwortRaw.replace(',','.'));
+  if (antwortRaw===''||isNaN(val)) return showMsg('spiel-msg','Bitte gib deinen neuen Kontostand ein (Schritt 2).','error');
+
+  const erwartet = s.kontostand + s.aufgabe.delta;
+  const normalize = str => str.replace(/−/g,'-').replace(/\s/g,'').toLowerCase();
+  const rRichtig = normalize(rechnung) === normalize(s.aufgabe.formel);
+  const kRichtig = val === erwartet;
+
+  if (!rRichtig && !kRichtig) { s.fehler++; s.streak=0; s.beantwortet=true; showMsg('spiel-msg',`❌ Beides falsch! Richtig: <b>${s.aufgabe.formel}</b> → <b>${erwartet}</b>`,'error'); }
+  else if (!rRichtig)          { s.fehler++; s.streak=0; s.beantwortet=true; showMsg('spiel-msg',`❌ Rechnung falsch! So: <b>${s.aufgabe.formel}</b>`,'error'); }
+  else if (!kRichtig)          { s.fehler++; s.streak=0; s.beantwortet=true; showMsg('spiel-msg',`❌ Kontostand falsch! Richtig: <b>${erwartet}</b>`,'error'); }
+  else {
+    s.streak++; s.bestStreak=Math.max(s.bestStreak,s.streak); s.kontostand=erwartet;
+    s.maxKontostand=Math.max(s.maxKontostand,erwartet); s.beantwortet=true;
+    showMsg('spiel-msg',`✅ Perfekt! Neuer Kontostand: <b>${erwartet}</b>`,'success');
+  }
+
+  await window.fbSaveGame({kontostand:s.kontostand,fehler:s.fehler,streak:s.streak,bestStreak:s.bestStreak,maxKontostand:s.maxKontostand});
+  await window.fbSaveWeeklyBest(s.kontostand);
+  document.getElementById('spiel-konto').textContent = s.kontostand;
+  document.getElementById('spiel-konto').style.color = s.kontostand>=0 ? 'var(--success)' : 'var(--accent2)';
+  document.getElementById('spiel-fehler').textContent = s.fehler;
+  document.getElementById('spiel-streak').textContent = s.streak;
+  document.getElementById('spiel-pruefen-btn').style.display='none';
+}
+
+function spielNeueAufgabe() {
+  spielState.aufgabe = genAufgabe(spielState.aufgabe?.id ?? null);
+  spielState.beantwortet = false;
+  renderSpiel();
+}
+
+// ─── EXTREME ─────────────────────────────
+let extState = null;
+
+function genExtremeAufgabe(prevId) {
+  let t;
+  do {
+    const type=rnd(1,7);
+    if (type===1) { const x=rnd(10,200); t={text:`Du verlierst ${x} Guthaben`,delta:-x,id:`e1_${x}`,formel:`-(+${x})`}; }
+    else if(type===2){ const x=rnd(10,200); t={text:`Du bekommst ${x} Schulden`,delta:-x,id:`e2_${x}`,formel:`+(−${x})`}; }
+    else if(type===3){ const x=rnd(10,200); t={text:`Du gibst ${x} Schulden ab`,delta:+x,id:`e3_${x}`,formel:`-(−${x})`}; }
+    else if(type===4){ const x=rnd(10,200); t={text:`Du bekommst ${x} Guthaben`,delta:+x,id:`e4_${x}`,formel:`+(+${x})`}; }
+    else if(type===5){ const n=rnd(2,10),x=rnd(10,100); t={text:`${n}× Du verlierst ${x} Guthaben`,delta:-(n*x),id:`e5_${n}_${x}`,formel:`${n}·(+(${x}))`}; }
+    else if(type===6){ const n=rnd(2,10),x=rnd(10,100); t={text:`${n}× Du gibst ${x} Schulden ab`,delta:+(n*x),id:`e6_${n}_${x}`,formel:`${n}·(−(${x}))`}; }
+    else { const x=rnd(20,150),y=rnd(20,100); t={text:`Du bekommst ${x} Schulden und verlierst ${y} Guthaben`,delta:-(x+y),id:`e7_${x}_${y}`,formel:`+(−${x})+(−${y})`}; }
+  } while(t.id === prevId);
+  return t;
+}
+
+async function loadExtreme() {
+  const d = await window.fbGetExtreme();
+  extState = {...d, aufgabe: genExtremeAufgabe(null), beantwortet: false};
+  renderExtreme();
+}
+
+function renderExtreme() {
+  const s = extState;
+  document.getElementById('ext-konto').textContent  = s.kontostand;
+  document.getElementById('ext-konto').style.color  = s.kontostand>=0 ? 'var(--success)' : 'var(--accent2)';
+  document.getElementById('ext-fehler').textContent = s.fehler;
+  document.getElementById('ext-streak').textContent = s.streak;
+  document.getElementById('ext-aufgabe').textContent= s.aufgabe.text;
+  document.getElementById('ext-rekord').textContent = `Beste Streak: ${s.bestStreak} | Max: ${s.maxKontostand} | Min: ${s.minKontostand}`;
+  document.getElementById('ext-kontext').textContent= s.kontostand<-200?'🚨 Tief in den roten Zahlen!':s.kontostand<0?'⚠️ Im Minus!':s.kontostand>200?'🏆 Gut im Plus!':'';
+  document.getElementById('ext-rechnung').value=''; document.getElementById('ext-antwort').value=''; document.getElementById('ext-msg').innerHTML='';
+  const b1=document.getElementById('ext-step1-block'); const b2=document.getElementById('ext-step2-block');
+  b1.classList.add('active-step'); b1.style.opacity='1'; b1.style.pointerEvents='auto';
+  b2.classList.remove('active-step'); b2.style.opacity='0.4'; b2.style.pointerEvents='auto'; b2.style.cursor='pointer';
+  b2.onclick = extRechnungWeiter;
+  document.getElementById('ext-pruefen-btn').style.display = s.beantwortet ? 'none' : 'block';
+}
+
+function extRechnungWeiter() {
+  const b2=document.getElementById('ext-step2-block');
+  b2.style.opacity='1'; b2.style.cursor='default'; b2.classList.add('active-step'); b2.onclick=null;
+}
+
+async function extPruefen() {
+  const s = extState;
+  if (s.beantwortet) return;
+  const rechnung=document.getElementById('ext-rechnung').value.trim();
+  const antwortRaw=document.getElementById('ext-antwort').value;
+  if (!rechnung) return showMsg('ext-msg','Bitte schreibe zuerst die Rechnung auf.','error');
+  const val=parseFloat(antwortRaw.replace(',','.'));
+  if (antwortRaw===''||isNaN(val)) return showMsg('ext-msg','Bitte gib den neuen Kontostand ein.','error');
+  const erwartet=s.kontostand+s.aufgabe.delta;
+  const normalize=str=>str.replace(/−/g,'-').replace(/\s/g,'').toLowerCase();
+  const rR=normalize(rechnung)===normalize(s.aufgabe.formel); const kR=val===erwartet;
+  if (!rR&&!kR){s.fehler++;s.streak=0;s.beantwortet=true;showMsg('ext-msg',`❌ Beides falsch! Richtig: <b>${s.aufgabe.formel}</b> → <b>${erwartet}</b>`,'error');}
+  else if(!rR){s.fehler++;s.streak=0;s.beantwortet=true;showMsg('ext-msg',`❌ Rechnung falsch! So: <b>${s.aufgabe.formel}</b>`,'error');}
+  else if(!kR){s.fehler++;s.streak=0;s.beantwortet=true;showMsg('ext-msg',`❌ Kontostand falsch! Richtig: <b>${erwartet}</b>`,'error');}
+  else{s.streak++;s.bestStreak=Math.max(s.bestStreak,s.streak);s.kontostand=erwartet;s.maxKontostand=Math.max(s.maxKontostand,erwartet);s.minKontostand=Math.min(s.minKontostand,erwartet);s.beantwortet=true;
+    showMsg('ext-msg',`${erwartet<-300?'💀':erwartet<0?'📉':'✅'} Richtig! Neuer Kontostand: <b>${erwartet}</b>`,'success');}
+  await window.fbSaveExtreme({kontostand:s.kontostand,fehler:s.fehler,streak:s.streak,bestStreak:s.bestStreak,maxKontostand:s.maxKontostand,minKontostand:s.minKontostand});
+  document.getElementById('ext-konto').textContent=s.kontostand; document.getElementById('ext-konto').style.color=s.kontostand>=0?'var(--success)':'var(--accent2)';
+  document.getElementById('ext-fehler').textContent=s.fehler; document.getElementById('ext-streak').textContent=s.streak;
+  document.getElementById('ext-pruefen-btn').style.display='none';
+}
+
+function extNeueAufgabe() { extState.aufgabe=genExtremeAufgabe(extState.aufgabe?.id??null); extState.beantwortet=false; renderExtreme(); }
+
+// ─── LEADERBOARD ─────────────────────────
+let activeTab = 'konto';
+
+function getAvatarDisplay(av) {
+  if (!av) return '😎';
+  if (av.type==='emoji') return av.emoji || '😎';
+  return '🦫';
+}
+
+function renderRanking(containerId, players, sortFn, valFn, colorFn) {
+  const sorted = [...players].sort(sortFn);
+  const el = document.getElementById(containerId);
+  if (!sorted.length) { el.innerHTML=`<div style="text-align:center;color:var(--dim);padding:20px;">Noch keine Spieler</div>`; return; }
+  el.innerHTML = sorted.map((p,i) => {
+    const rank=i+1; const isMe=p.uid===window._currentUID;
+    const rankEmoji=rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':`${rank}.`;
+    const rankClass=rank===1?'lb-rank-1':rank===2?'lb-rank-2':rank===3?'lb-rank-3':'lb-rank-other';
+    const valColor = colorFn ? colorFn(p) : 'var(--accent)';
+    return `<div class="lb-row ${isMe?'me':''}">
+      <div class="lb-rank ${rankClass}">${rankEmoji}</div>
+      <div style="font-size:22px">${getAvatarDisplay(p.avatar)}</div>
+      <div class="lb-row-name">${p.name}${isMe?'<span class="lb-me-badge">Du</span>':''}</div>
+      <div class="lb-row-val" style="color:${valColor}">${valFn(p)}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadLeaderboard() {
+  document.getElementById('lb-loading').style.display='block';
+  ['konto','live','streak','fehler','clicker','extreme'].forEach(t=>document.getElementById('lb-list-'+t).style.display='none');
+
+  const players = await window.fbGetAllPlayers();
+  document.getElementById('lb-loading').style.display='none';
+
+  renderRanking('lb-list-konto',  players, (a,b)=>b.weeklyBest-a.weeklyBest,   p=>p.weeklyBest);
+  renderRanking('lb-list-live',   players, (a,b)=>b.kontostand-a.kontostand,   p=>(p.kontostand>=0?'+':'')+p.kontostand+' 💰', p=>p.kontostand>=0?'var(--success)':'var(--accent2)');
+  renderRanking('lb-list-streak', players, (a,b)=>b.bestStreak-a.bestStreak,   p=>p.bestStreak+' 🔥');
+  renderRanking('lb-list-fehler', players, (a,b)=>a.fehler-b.fehler,           p=>p.fehler+' ❌');
+  renderRanking('lb-list-clicker',players, (a,b)=>b.totalClicks-a.totalClicks, p=>p.totalClicks.toLocaleString('de-DE')+' 👆');
+  renderRanking('lb-list-extreme',players, (a,b)=>b.extremeKonto-a.extremeKonto, p=>(p.extremeKonto>=0?'+':'')+p.extremeKonto+' 💀', p=>p.extremeKonto>=0?'#ff9966':'var(--accent2)');
+
+  switchTab(activeTab);
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  ['konto','live','streak','fehler','clicker','extreme'].forEach(t => {
+    document.getElementById('lb-list-'+t).style.display = t===tab ? 'block' : 'none';
+    document.getElementById('tab-'+t)?.classList.toggle('active-tab', t===tab);
+  });
+}
+
+// ─── CLICKER ─────────────────────────────
+let clickerState = null;
+let clickerLastTime = 0;
+let clickerCpsBuffer = [];
+let clickerCpsInterval = null;
+let clickerBanInterval = null;
+const BAN_DURATION_MS = 30*60*1000;
+const MIN_CLICK_INTERVAL = 50;
+
+async function loadClicker() {
+  if (clickerCpsInterval) clearInterval(clickerCpsInterval);
+  if (clickerBanInterval) clearInterval(clickerBanInterval);
+  const d = await window.fbGetClicker();
+  d.sessionClicks = 0;
+  clickerState = {...d};
+  clickerLastTime=0; clickerCpsBuffer=[];
+  checkBan();
+}
+
+function checkBan() {
+  if (clickerState.banUntil > Date.now()) { showBanOverlay(); return; }
+  hideBanOverlay(); renderClicker();
+  if (clickerCpsInterval) clearInterval(clickerCpsInterval);
+  clickerCpsInterval = setInterval(()=>{
+    const now=Date.now(); clickerCpsBuffer=clickerCpsBuffer.filter(t=>now-t<1000);
+    document.getElementById('clicker-cps').textContent = clickerCpsBuffer.length.toFixed(1);
+  },200);
+}
+
+function showBanOverlay() {
+  document.getElementById('clicker-ban-overlay').style.display='block';
+  document.getElementById('clicker-main').style.display='none';
+  if (clickerBanInterval) clearInterval(clickerBanInterval);
+  const tick=()=>{
+    const rem=Math.max(0,clickerState.banUntil-Date.now());
+    const m=Math.floor(rem/60000); const s=Math.floor((rem%60000)/1000);
+    document.getElementById('clicker-ban-timer').textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+    if(rem<=0){clearInterval(clickerBanInterval);hideBanOverlay();renderClicker();checkBan();}
+  };
+  tick(); clickerBanInterval=setInterval(tick,1000);
+}
+function hideBanOverlay() { document.getElementById('clicker-ban-overlay').style.display='none'; document.getElementById('clicker-main').style.display='block'; }
+
+function renderClicker() {
+  const s=clickerState;
+  document.getElementById('clicker-score').textContent   = s.totalClicks.toLocaleString('de-DE');
+  document.getElementById('clicker-session').textContent = s.sessionClicks.toLocaleString('de-DE');
+  document.getElementById('clicker-best-day').textContent= s.bestDay.toLocaleString('de-DE');
+  document.getElementById('clicker-alltime').textContent = s.totalClicks.toLocaleString('de-DE');
+  document.getElementById('clicker-cps').textContent='0.0';
+}
+
+async function clickerClick(event) {
+  if (clickerState.banUntil > Date.now()) return;
+  const now=Date.now(); const gap=now-clickerLastTime;
+  if (clickerLastTime>0 && gap<MIN_CLICK_INTERVAL) {
+    clickerState.banUntil=now+BAN_DURATION_MS;
+    await window.fbSaveClicker(clickerState);
+    if (clickerCpsInterval) clearInterval(clickerCpsInterval);
+    showBanOverlay(); return;
+  }
+  clickerLastTime=now;
+  clickerState.totalClicks++; clickerState.sessionClicks++;
+  clickerState.bestDay=Math.max(clickerState.bestDay,clickerState.sessionClicks);
+  await window.fbSaveClicker(clickerState);
+  clickerCpsBuffer.push(now);
+  document.getElementById('clicker-score').textContent   = clickerState.totalClicks.toLocaleString('de-DE');
+  document.getElementById('clicker-session').textContent = clickerState.sessionClicks.toLocaleString('de-DE');
+  document.getElementById('clicker-alltime').textContent = clickerState.totalClicks.toLocaleString('de-DE');
+  spawnPop(event);
+}
+
+function spawnPop(event) {
+  const pop=document.createElement('div'); pop.className='click-pop'; pop.textContent='+1';
+  let x,y;
+  if(event&&event.clientX){x=event.clientX;y=event.clientY;}
+  else{const btn=document.getElementById('clicker-button');const r=btn.getBoundingClientRect();x=r.left+r.width/2;y=r.top+r.height/2;}
+  pop.style.left=(x-16)+'px'; pop.style.top=(y-16)+'px';
+  document.body.appendChild(pop); setTimeout(()=>pop.remove(),750);
+}
+
+// ─── PROFIL ──────────────────────────────
+async function loadProfil() {
+  const d  = await window.fbGetGame();
+  const av = await window.fbGetAvatar();
+  renderAvatarEl(av);
+  document.getElementById('profil-name').textContent     = window._currentUser;
+  document.getElementById('profil-konto').textContent    = d.kontostand;
+  document.getElementById('profil-maxkonto').textContent = d.maxKontostand;
+  document.getElementById('profil-fehler').textContent   = d.fehler;
+  document.getElementById('profil-streak').textContent   = (d.bestStreak||0)+' Aufgaben';
+  document.getElementById('reset-section').style.display = window.fbIsAdmin() ? 'block' : 'none';
+  document.getElementById('avatar-picker').style.display='none';
+  document.getElementById('reset-msg').innerHTML='';
+}
+
+function renderAvatarEl(av) {
+  const el = document.getElementById('profil-avatar');
+  if (!av || av.type==='emoji') {
+    el.innerHTML = av?.emoji || window._currentUser?.charAt(0).toUpperCase() || '?';
+    el.style.background='var(--accent)';
+  }
+}
+
+async function setAvatar(emoji) {
+  const data = { type:'emoji', emoji };
+  await window.fbSaveAvatar(data);
+  renderAvatarEl(data);
+  document.getElementById('avatar-picker').style.display='none';
+}
+
+// ─── ADMIN ───────────────────────────────
+let adminUsers = [];
+
+async function adminLadeUser() {
+  const listEl = document.getElementById('admin-user-list');
+  if (listEl.style.display !== 'none') { listEl.style.display='none'; return; }
+  listEl.style.display='block';
+  listEl.innerHTML='<div style="text-align:center;color:var(--dim);padding:10px;"><span class="spinner"></span>Lade Nutzer…</div>';
+  adminUsers = await window.fbAdminGetAllUsers();
+  if (!adminUsers.length) { listEl.innerHTML='<div style="color:var(--dim);text-align:center;">Keine Nutzer gefunden.</div>'; return; }
+
+  // Dropdown für Geld-Geben befüllen
+  const select = document.getElementById('geld-empfaenger');
+  select.innerHTML = '<option value="">– Spieler auswählen –</option>';
+  adminUsers.filter(u=>u.uid!==window._currentUID).forEach(u=>{
+    const opt=document.createElement('option'); opt.value=u.uid; opt.textContent=u.name;
+    select.appendChild(opt);
+  });
+  select.onchange = () => {
+    const u = adminUsers.find(x=>x.uid===select.value);
+    document.getElementById('geld-empfaenger-konto').textContent = u ? `Kontostand: ${u.kontostand}` : '';
+  };
+
+  listEl.innerHTML = `
+    <div style="font-size:11px;color:var(--dim);margin-bottom:8px;text-align:center;">
+      🔐 Passwörter werden von Firebase verwaltet – du kannst sie in der <a href="https://console.firebase.google.com" target="_blank" style="color:var(--warning)">Firebase Console</a> sehen & zurücksetzen.
+    </div>
+    <div style="background:#1a2a3a;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px;color:#66aaff;text-align:center;">
+      👉 <b>Authentication → Users</b> in der Firebase Console zeigt alle Emails & UIDs
+    </div>
+    ${adminUsers.map(u=>`
+      <div class="admin-user-row">
+        <div style="font-size:20px">👤</div>
+        <div style="flex:1">
+          <div class="admin-user-name">${u.name} ${u.uid===window._currentUID?'<span class="admin-badge">ICH</span>':''}</div>
+          <div class="admin-user-stats">💰 ${u.kontostand} | 👆 ${u.clicker} Klicks | ID: ${u.uid.substring(0,8)}…</div>
+        </div>
+      </div>`).join('')}
+  `;
+}
+
+let geldUILoaded = false;
+function toggleGeldGeben() {
+  const sec = document.getElementById('geld-geben-section');
+  sec.style.display = sec.style.display==='none' ? 'block' : 'none';
+  if (!geldUILoaded) { adminLadeUser(); geldUILoaded=true; }
+}
+
+async function adminGeldGeben() {
+  const uid    = document.getElementById('geld-empfaenger').value;
+  const betrag = parseInt(document.getElementById('geld-betrag').value);
+  if (!uid)              return showMsg('geld-msg','❌ Bitte einen Spieler auswählen.','error');
+  if (isNaN(betrag)||betrag===0) return showMsg('geld-msg','❌ Bitte einen gültigen Betrag eingeben.','error');
+  const neuerKonto = await window.fbAdminGeldGeben(uid, betrag);
+  const name = adminUsers.find(u=>u.uid===uid)?.name || uid;
+  showMsg('geld-msg',`✅ <b>${name}</b>: Neuer Kontostand = <b>${neuerKonto}</b>`,'success');
+  document.getElementById('geld-betrag').value='';
+}
+
+let resetKlicks=0, resetTimer=null;
+async function adminResetKonten() {
+  resetKlicks++;
+  if(resetTimer) clearTimeout(resetTimer);
+  resetTimer=setTimeout(()=>resetKlicks=0,5000);
+  if(resetKlicks===1) showMsg('reset-msg','⚠️ Sicher? Noch 2× klicken.','error');
+  else if(resetKlicks===2) showMsg('reset-msg','⚠️ Wirklich? Noch 1× klicken!','error');
+  else if(resetKlicks>=3){
+    resetKlicks=0; clearTimeout(resetTimer);
+    await window.fbAdminResetAlleKonten();
+    showMsg('reset-msg','✅ Alle Konten auf 10 zurückgesetzt!','success');
+  }
+}
+
+let clickerResetKlicks=0, clickerResetTimer=null;
+async function adminResetClicker() {
+  clickerResetKlicks++;
+  if(clickerResetTimer) clearTimeout(clickerResetTimer);
+  clickerResetTimer=setTimeout(()=>clickerResetKlicks=0,5000);
+  if(clickerResetKlicks===1) showMsg('reset-msg','⚠️ Clicker zurücksetzen? Noch 2× klicken.','error');
+  else if(clickerResetKlicks===2) showMsg('reset-msg','⚠️ Wirklich? Noch 1× klicken!','error');
+  else if(clickerResetKlicks>=3){
+    clickerResetKlicks=0; clearTimeout(clickerResetTimer);
+    await window.fbAdminResetClicker();
+    showMsg('reset-msg','✅ Clicker-Scores zurückgesetzt!','success');
+  }
+}
+
+async function toggleBonusCode() {
+  const sec=document.getElementById('bonus-code-section');
+  sec.style.display=sec.style.display==='none'?'block':'none';
+  if(sec.style.display!=='none'){
+    const code=await window.fbGetBonusCode();
+    document.getElementById('aktueller-code').textContent=code;
+  }
+}
+
+async function adminSaveCode() {
+  const neu=document.getElementById('neuer-code-input').value.trim().toUpperCase();
+  if(!neu||neu.length<4) return showMsg('code-msg','Code muss mind. 4 Zeichen lang sein.','error');
+  await window.fbSetBonusCode(neu);
+  BONUS_CODE_CACHE=neu;
+  document.getElementById('aktueller-code').textContent=neu;
+  showMsg('code-msg',`✅ Code geändert: ${neu}`,'success');
+}
+
+// ─── ENTER KEYS ──────────────────────────
+document.getElementById('spiel-antwort').addEventListener('keydown', e=>{ if(e.key==='Enter') spielPruefen(); });
+document.getElementById('ext-antwort').addEventListener('keydown', e=>{ if(e.key==='Enter') extPruefen(); });
+document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+
+// ─── CONFIG CHECK ────────────────────────
+setTimeout(()=>{
+  if(!window.fbCheckConfig || !window.fbCheckConfig()){
+    document.getElementById('config-warning').style.display='flex';
+  }
+}, 2000);
+</script>
+</body>
+</html>
